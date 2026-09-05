@@ -1,0 +1,8 @@
+claude-agent-sdk
+python-telegram-bot
+psycopg2-binary
+python-dotenv
+reportlab
+python-pptx
+pytest
+pytest-asyncio

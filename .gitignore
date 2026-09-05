@@ -1,0 +1,16 @@
+# secrets - never commit this
+.env
+
+# python
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# generated artifacts (invoices/decks you generate while testing)
+*.pdf
+*.pptx
+
+# editor/OS junk
+.DS_Store
+.vscode/
