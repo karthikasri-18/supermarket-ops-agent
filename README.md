@@ -2,8 +2,7 @@
 
 Telegram bot that runs an Indian kirana store end-to-end via a conversational agent.
 
-> This README gets filled in properly on Day 5. For now it's just a placeholder
-> so the repo isn't empty.
+> This README gets filled in properly after completion. 
 
 ## Harness
 TBD (Claude Agent SDK)
