@@ -26,7 +26,7 @@ from typing import Optional
 from google import genai
 from google.genai import types
 
-from tools.inventory import receive_stock, get_stock_level, get_low_stock_items, get_product_by_sku
+from tools.inventory import receive_stock, get_stock_level, get_low_stock_items, get_product_by_sku, search_products
 from tools.billing import start_bill, add_bill_item, remove_bill_item, get_bill_draft, finalize_bill
 from tools.khata import get_customer_balance, charge_khata, record_khata_payment
 from tools.preferences import get_preference, set_preference
@@ -45,6 +45,22 @@ def tool_get_product_info(sku: str) -> dict:
         sku: The product's SKU code.
     """
     return get_product_by_sku(sku)
+
+
+def tool_search_products(query: str) -> dict:
+    """Search for products by name or partial name (e.g. "sugar", "atta",
+    "maggi"). ALWAYS call this first to find a product's real SKU before
+    calling any other product/stock/billing tool -- the owner refers to
+    products by plain name, never by SKU code, so you must resolve the
+    name yourself. An empty result means the shop genuinely doesn't stock
+    that item; say so honestly rather than asking the owner for a SKU
+    (they won't know one). If more than one match comes back, ask the
+    owner which one they mean rather than guessing.
+
+    Args:
+        query: A product name or partial name to search for.
+    """
+    return search_products(query)
 
 
 def tool_get_stock_level(sku: str) -> dict:
@@ -206,7 +222,7 @@ def tool_close_day(day: Optional[str] = None) -> dict:
 
 
 ALL_TOOLS = [
-    tool_get_product_info, tool_get_stock_level, tool_get_low_stock_items, tool_receive_stock,
+    tool_get_product_info, tool_search_products, tool_get_stock_level, tool_get_low_stock_items, tool_receive_stock,
     tool_start_bill, tool_add_bill_item, tool_remove_bill_item, tool_get_bill_draft, tool_finalize_bill,
     tool_get_customer_balance, tool_charge_khata, tool_record_khata_payment,
     tool_get_preference, tool_set_preference, tool_get_sales_summary, tool_close_day,
@@ -214,6 +230,14 @@ ALL_TOOLS = [
 
 SYSTEM_PROMPT = """You are the operations agent for an Indian kirana (grocery) store.
 The owner talks to you in plain, terse, real-shopkeeper English via Telegram.
+
+PRODUCT NAMES: the owner will say things like "sugar", "atta", "maggi" --
+never a SKU code, because they don't know what a SKU is. Whenever you
+need a SKU and don't already have it from this conversation, call
+search_products with the plain name FIRST, before calling any other
+product/stock/billing tool. If it returns zero matches, tell the owner
+honestly that you don't see that item -- do NOT ask them for a SKU code.
+If it returns more than one match, ask which one they mean.
 
 GROUNDING RULE (most important): never state a price, stock level, or
 khata balance without having just called a tool for it THIS turn. Never

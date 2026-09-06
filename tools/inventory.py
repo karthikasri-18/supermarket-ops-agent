@@ -23,6 +23,31 @@ def get_product_by_sku(sku: str) -> dict:
         return {"ok": True, "product": dict(row)}
 
 
+def search_products(query: str) -> dict:
+    """
+    Fuzzy name/SKU lookup -- this is how the agent resolves what the
+    owner actually calls things ("sugar", "atta", "maggi") into a real
+    SKU, since owners never know or say SKU codes. Matches against
+    both name and sku, case-insensitive, substring match.
+
+    Returns {"ok": True, "matches": [...], "count": N}. An empty list
+    is a real "we don't stock that", not an error -- the caller should
+    relay that honestly rather than asking the owner for a SKU.
+    """
+    with get_connection() as cur:
+        cur.execute(
+            """
+            SELECT sku, name, unit, sell_price, gst_rate, quantity_on_hand
+            FROM products
+            WHERE name ILIKE %s OR sku ILIKE %s
+            ORDER BY name
+            """,
+            (f"%{query}%", f"%{query}%"),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        return {"ok": True, "matches": rows, "count": len(rows)}
+
+
 def get_stock_level(sku: str) -> dict:
     """
     Returns just the current quantity_on_hand for a SKU -- the
