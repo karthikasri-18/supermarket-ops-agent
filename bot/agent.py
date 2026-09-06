@@ -241,7 +241,7 @@ Keep replies short and conversational -- the owner is running a shop,
 not reading a report.
 """
 
-MODEL_NAME = "gemini-3.6-flash"
+MODEL_NAME = "gemini-3.1-flash-lite"
 
 # One shared client for the whole process. Chat SESSIONS (below) are what
 # hold per-conversation history -- the client itself is just a connection,

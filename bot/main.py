@@ -21,6 +21,7 @@ load_dotenv()
 
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, ContextTypes, filters
+from google.genai.errors import ClientError
 
 from bot.agent import new_chat_session
 from db.connection import get_connection
@@ -81,7 +82,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # session.send_message is a blocking call (network + our own blocking
     # DB calls inside tool execution) -- run it in a thread so it doesn't
     # freeze the bot's whole event loop while it's working.
-    response = await asyncio.to_thread(session.send_message, message_with_context)
+    try:
+        response = await asyncio.to_thread(session.send_message, message_with_context)
+    except ClientError as e:
+        if getattr(e, "code", None) == 429:
+            # Free-tier rate limit hit -- tell the owner plainly instead of
+            # crashing with a raw traceback. This is a real, expected
+            # situation on a free API tier, not a bug to hide.
+            await update.message.reply_text(
+                "Hit the free API rate limit for a moment -- please wait a bit and try again."
+            )
+            return
+        raise
 
     reply_text = (response.text or "").strip()
     if reply_text:
