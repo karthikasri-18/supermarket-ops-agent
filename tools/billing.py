@@ -95,13 +95,27 @@ def add_bill_item(bill_id: int, sku: str, qty: float, unit_price: float = None,
                 "detail": "Selling below cost needs override_below_cost=True",
             }
 
-        if qty > float(product["quantity_on_hand"]):
+        # Sum what THIS draft bill already has for this product -- the
+        # same SKU can be added across multiple messages (e.g. "4 maggi"
+        # now, "6 more maggi" later), so the real check is against total
+        # demand so far, not just this one call's qty.
+        cur.execute(
+            "SELECT COALESCE(SUM(qty), 0) AS already_qty FROM bill_items "
+            "WHERE bill_id = %s AND product_id = %s",
+            (bill_id, product["id"]),
+        )
+        already_in_bill = float(cur.fetchone()["already_qty"])
+        total_demand = already_in_bill + qty
+
+        if total_demand > float(product["quantity_on_hand"]):
             return {
                 "ok": False,
                 "error": "insufficient_stock",
                 "sku": sku,
                 "available": float(product["quantity_on_hand"]),
                 "requested": qty,
+                "already_in_bill": already_in_bill,
+                "total_requested": total_demand,
             }
 
         split = compute_gst_split(qty, price, float(product["gst_rate"]))
@@ -227,15 +241,27 @@ def finalize_bill(bill_id: int, payment_mode: str = None, payment_ref: str = Non
             cur.execute("SELECT * FROM products WHERE id = %s FOR UPDATE", (pid,))
             locked[pid] = cur.fetchone()
 
+        # Aggregate demand PER PRODUCT before checking. The same product
+        # can appear across multiple bill_item rows -- e.g. added in two
+        # separate messages ("4 maggi" then later "add 6 more maggi").
+        # Checking each row independently against raw stock would miss
+        # the case where no single row oversells but their SUM does.
+        demand_by_product = {}
+        sku_by_product = {}
         for row in items:
-            available = float(locked[row["product_id"]]["quantity_on_hand"])
-            if float(row["qty"]) > available:
+            pid = row["product_id"]
+            demand_by_product[pid] = demand_by_product.get(pid, 0.0) + float(row["qty"])
+            sku_by_product[pid] = row["sku"]
+
+        for pid, total_qty in demand_by_product.items():
+            available = float(locked[pid]["quantity_on_hand"])
+            if total_qty > available:
                 return {
                     "ok": False,
                     "error": "insufficient_stock",
-                    "sku": row["sku"],
+                    "sku": sku_by_product[pid],
                     "available": available,
-                    "requested": float(row["qty"]),
+                    "requested": total_qty,
                 }
 
         for row in items:

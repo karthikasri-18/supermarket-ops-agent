@@ -136,3 +136,23 @@ def test_below_cost_sale_allowed_with_explicit_override(test_product):
 
     assert result["ok"] is True
     assert result["sku"] == sku
+
+
+def test_same_product_added_twice_catches_cumulative_oversell(test_product):
+    """
+    test_product has 10 units. Adding 6, then 6 more (12 total) --
+    neither call alone exceeds 10, but their SUM does. This is exactly
+    the bug found in live testing: "4 maggi" then later "500 more maggi"
+    in the same draft bill.
+    """
+    sku, _ = test_product
+    bill = start_bill()
+
+    first = add_bill_item(bill["bill_id"], sku, 6)
+    assert first["ok"] is True  # 6 <= 10, fine on its own
+
+    second = add_bill_item(bill["bill_id"], sku, 6)
+    assert second["ok"] is False
+    assert second["error"] == "insufficient_stock"
+    assert second["already_in_bill"] == 6.0
+    assert second["total_requested"] == 12.0

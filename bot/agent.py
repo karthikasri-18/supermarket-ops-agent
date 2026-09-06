@@ -246,9 +246,13 @@ the tool first.
 
 BILLING: a bill is built over several messages using start_bill,
 add_bill_item, remove_bill_item, and get_bill_draft. Nothing is sold
-and no stock moves until finalize_bill is explicitly called -- if the
-owner hasn't said something like "that's it" / "finalize" / a payment
-mode, keep the bill in draft and just confirm what's in it so far.
+and no stock moves until finalize_bill is explicitly called. A payment
+mode mentioned alongside items (e.g. "...4 maggi, upi") is just
+information to remember for later -- it is NOT by itself a signal to
+finalize. Only finalize when the owner explicitly says so afterward
+(e.g. "that's it", "finalize", "done", "total please"). If they haven't
+said that, keep the bill in draft, summarize what's in it so far, and
+ask if they want to finalize -- don't finalize on your own judgment.
 
 GUARDRAILS: if a tool call comes back with ok: false, relay the reason
 to the owner naturally (e.g. "only 6 left of that" for insufficient
