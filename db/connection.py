@@ -9,12 +9,28 @@ consistent way of opening transactions and locking rows.
 import os
 import psycopg2
 import psycopg2.extras
+import psycopg2.extensions
 from contextlib import contextmanager
 from dotenv import load_dotenv
 
 load_dotenv()  # reads .env into environment variables
 
 DATABASE_URL = os.environ["DATABASE_URL"]
+
+# By default psycopg2 returns Postgres NUMERIC columns as Python Decimal
+# objects. That's precise, but Decimal isn't JSON-serializable -- and our
+# tool functions get their results shipped to the LLM as JSON (Gemini's
+# automatic function calling does this internally; the same would be true
+# of any other agent SDK). Rather than converting Decimal->float by hand
+# in every function that touches a NUMERIC column, register this once,
+# globally, so every NUMERIC value from every query is already a plain
+# float by the time our code sees it.
+_DEC2FLOAT = psycopg2.extensions.new_type(
+    psycopg2.extensions.DECIMAL.values,
+    "DEC2FLOAT",
+    lambda value, curs: float(value) if value is not None else None,
+)
+psycopg2.extensions.register_type(_DEC2FLOAT)
 
 
 @contextmanager

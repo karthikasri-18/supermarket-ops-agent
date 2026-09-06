@@ -115,3 +115,24 @@ def test_concurrent_finalize_does_not_overdraw_stock(test_product):
         remaining = float(cur.fetchone()["quantity_on_hand"])
 
     assert remaining == 4.0  # 10 - 6, only the winner's sale applied
+
+
+def test_below_cost_sale_is_refused_without_override(test_product):
+    sku, _ = test_product
+    bill = start_bill()
+    # test_product has cost_price=5 -- offering it at 3 is below cost
+    result = add_bill_item(bill["bill_id"], sku, 1, unit_price=3)
+
+    assert result["ok"] is False
+    assert result["error"] == "below_cost"
+    assert result["cost_price"] == 5.0
+    assert result["attempted_price"] == 3.0
+
+
+def test_below_cost_sale_allowed_with_explicit_override(test_product):
+    sku, _ = test_product
+    bill = start_bill()
+    result = add_bill_item(bill["bill_id"], sku, 1, unit_price=3, override_below_cost=True)
+
+    assert result["ok"] is True
+    assert result["sku"] == sku

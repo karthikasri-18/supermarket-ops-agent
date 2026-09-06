@@ -1,131 +1,216 @@
 """
 bot/agent.py
 
-Wraps the plain Python functions from tools/*.py as Claude Agent
-SDK tools, and builds the ClaudeAgentOptions used to run the agent.
+Rewired to use Google's Gemini API (google-genai SDK) instead of
+Anthropic's Claude Agent SDK -- switched specifically because
+Gemini's Developer API (via Google AI Studio) has a genuinely free
+tier with no card required. Everything in tools/*.py is completely
+unchanged; only this wrapping layer is different from before.
 
-Nothing in here does business logic -- that already lives in
-tools/*.py and is already tested. This file is purely plumbing:
-describe each function to Claude, and let Claude decide when to
-call it.
+Key facts about this SDK (checked against Google's current docs,
+since this kind of library shifts fast):
+  - Package: google-genai (import as `from google import genai`)
+  - Plain Python functions with type hints + a Google-style docstring
+    (an "Args:" section) can be handed directly as `tools=[...]` --
+    the SDK builds the schema from the signature/docstring AND
+    automatically executes the function when the model calls it.
+    No manual dispatch loop needed.
+  - We use the `chats` module (client.chats.create + send_message)
+    rather than a raw one-shot call -- Google has flagged an
+    upcoming breaking change that removes automatic function calling
+    from direct generate_content calls in the SDK's next major
+    version, so this is the forward-compatible pattern.
 """
 
-import json
-
-from claude_agent_sdk import tool, create_sdk_mcp_server, ClaudeAgentOptions
+from typing import Optional
+from google import genai
+from google.genai import types
 
 from tools.inventory import receive_stock, get_stock_level, get_low_stock_items, get_product_by_sku
 from tools.billing import start_bill, add_bill_item, remove_bill_item, get_bill_draft, finalize_bill
 from tools.khata import get_customer_balance, charge_khata, record_khata_payment
+from tools.preferences import get_preference, set_preference
+from tools.analytics import get_sales_summary, close_day
 
 
-def _as_content(result: dict) -> dict:
-    """Every one of our tool functions returns a plain dict. The SDK
-    wants tool results shaped as {"content": [...]}. This wraps any
-    dict as a JSON text block -- Claude reads JSON fine."""
-    return {"content": [{"type": "text", "text": json.dumps(result)}]}
+# ---------- tool wrappers ----------
+# Gemini's automatic function calling reads these type hints and the
+# "Args:" docstring section directly to build each tool's schema --
+# so this isn't just documentation, the wording actually matters.
+
+def tool_get_product_info(sku: str) -> dict:
+    """Look up a product's details (price, GST rate, stock) by SKU.
+
+    Args:
+        sku: The product's SKU code.
+    """
+    return get_product_by_sku(sku)
 
 
-# ---------- inventory tools ----------
+def tool_get_stock_level(sku: str) -> dict:
+    """Get current stock quantity on hand for a product by SKU.
 
-@tool("get_product_info", "Look up a product's details (price, GST rate, stock) by SKU", {"sku": str})
-async def t_get_product_info(args):
-    return _as_content(get_product_by_sku(args["sku"]))
-
-
-@tool("get_stock_level", "Get current stock quantity for a product by SKU", {"sku": str})
-async def t_get_stock_level(args):
-    return _as_content(get_stock_level(args["sku"]))
+    Args:
+        sku: The product's SKU code.
+    """
+    return get_stock_level(sku)
 
 
-@tool("get_low_stock_items", "List all products at or below their reorder level", {})
-async def t_get_low_stock_items(args):
-    return _as_content(get_low_stock_items())
+def tool_get_low_stock_items() -> dict:
+    """List all products at or below their reorder level."""
+    return get_low_stock_items()
 
 
-@tool(
-    "receive_stock",
-    "Record stock coming into the shop for a SKU. Increments quantity on hand.",
-    {"sku": str, "qty": float, "cost_price": float},
-)
-async def t_receive_stock(args):
-    return _as_content(receive_stock(args["sku"], args["qty"], args.get("cost_price")))
+def tool_receive_stock(sku: str, qty: float, cost_price: Optional[float] = None) -> dict:
+    """Record stock coming into the shop for a SKU. Increments quantity on hand.
+
+    Args:
+        sku: The product's SKU code.
+        qty: Quantity received, must be positive.
+        cost_price: Optional new cost price for this batch, if the owner mentioned one.
+    """
+    return receive_stock(sku, qty, cost_price)
 
 
-# ---------- billing tools ----------
+def tool_start_bill(customer_id: Optional[int] = None) -> dict:
+    """Start a new draft bill, optionally linked to an existing customer id.
 
-@tool("start_bill", "Start a new draft bill, optionally for a named customer", {"customer_id": int})
-async def t_start_bill(args):
-    return _as_content(start_bill(args.get("customer_id")))
-
-
-@tool(
-    "add_bill_item",
-    "Add one line item (a product + quantity) to a draft bill. Does not touch stock.",
-    {"bill_id": int, "sku": str, "qty": float},
-)
-async def t_add_bill_item(args):
-    return _as_content(add_bill_item(args["bill_id"], args["sku"], args["qty"]))
+    Args:
+        customer_id: Optional existing customer id to link this bill to.
+    """
+    return start_bill(customer_id)
 
 
-@tool("remove_bill_item", "Remove a line item from a draft bill by its bill_item_id", {"bill_item_id": int})
-async def t_remove_bill_item(args):
-    return _as_content(remove_bill_item(args["bill_item_id"]))
+def tool_add_bill_item(bill_id: int, sku: str, qty: float,
+                        unit_price: Optional[float] = None,
+                        override_below_cost: bool = False) -> dict:
+    """Add one line item (a product + quantity) to a draft bill. Does not touch stock.
+
+    If this returns error='below_cost', do NOT retry with override_below_cost=True
+    on your own judgment. First tell the owner the cost price and ask them to
+    explicitly confirm they want to sell below cost, and only then retry with
+    the override set.
+
+    Args:
+        bill_id: The draft bill's id.
+        sku: The product's SKU code.
+        qty: Quantity to add.
+        unit_price: Optional override price; defaults to the product's sell_price.
+        override_below_cost: Only set true after the owner explicitly confirms.
+    """
+    return add_bill_item(bill_id, sku, qty, unit_price=unit_price, override_below_cost=override_below_cost)
 
 
-@tool("get_bill_draft", "Get the current items and total for a bill (draft or finalized)", {"bill_id": int})
-async def t_get_bill_draft(args):
-    return _as_content(get_bill_draft(args["bill_id"]))
+def tool_remove_bill_item(bill_item_id: int) -> dict:
+    """Remove a line item from a draft bill by its bill_item_id.
+
+    Args:
+        bill_item_id: The id of the bill_items row to remove.
+    """
+    return remove_bill_item(bill_item_id)
 
 
-@tool(
-    "finalize_bill",
-    "Finalize a draft bill: decrements stock, records the sale. Safe to call more than once.",
-    {"bill_id": int, "payment_mode": str, "payment_ref": str},
-)
-async def t_finalize_bill(args):
-    return _as_content(
-        finalize_bill(args["bill_id"], args.get("payment_mode"), args.get("payment_ref"))
-    )
+def tool_get_bill_draft(bill_id: int) -> dict:
+    """Get the current items and total for a bill, draft or finalized.
+
+    Args:
+        bill_id: The bill's id.
+    """
+    return get_bill_draft(bill_id)
 
 
-# ---------- khata tools ----------
+def tool_finalize_bill(bill_id: int, payment_mode: Optional[str] = None,
+                        payment_ref: Optional[str] = None) -> dict:
+    """Finalize a draft bill: decrements stock, records the sale. Safe to call
+    more than once -- a repeat call returns the already-finalized result
+    instead of decrementing stock again.
 
-@tool("get_customer_balance", "Get a customer's current khata (credit) balance by name", {"name": str})
-async def t_get_customer_balance(args):
-    return _as_content(get_customer_balance(args["name"]))
-
-
-@tool(
-    "charge_khata",
-    "Put an amount on a customer's khata (credit) -- they now owe the shop more",
-    {"name": str, "amount": float},
-)
-async def t_charge_khata(args):
-    return _as_content(charge_khata(args["name"], args["amount"]))
+    Args:
+        bill_id: The bill's id.
+        payment_mode: One of 'cash', 'upi', 'card', or 'khata'.
+        payment_ref: Optional payment reference, e.g. a UPI transaction id.
+    """
+    return finalize_bill(bill_id, payment_mode, payment_ref)
 
 
-@tool(
-    "record_khata_payment",
-    "Record a customer paying back some of their khata balance",
-    {"name": str, "amount": float},
-)
-async def t_record_khata_payment(args):
-    return _as_content(record_khata_payment(args["name"], args["amount"]))
+def tool_get_customer_balance(name: str) -> dict:
+    """Get a customer's current khata (credit) balance by name.
+
+    Args:
+        name: The customer's name.
+    """
+    return get_customer_balance(name)
+
+
+def tool_charge_khata(name: str, amount: float) -> dict:
+    """Put an amount on a customer's khata (credit) -- they now owe the shop more.
+
+    Args:
+        name: The customer's name.
+        amount: Amount to charge, must be positive.
+    """
+    return charge_khata(name, amount)
+
+
+def tool_record_khata_payment(name: str, amount: float) -> dict:
+    """Record a customer paying back some of their khata balance.
+
+    Args:
+        name: The customer's name.
+        amount: Amount paid, must be positive.
+    """
+    return record_khata_payment(name, amount)
+
+
+def tool_get_preference(key: str) -> dict:
+    """Get one stored shop preference by key (e.g. 'default_payment_mode').
+
+    Args:
+        key: The preference key.
+    """
+    return get_preference(key)
+
+
+def tool_set_preference(key: str, value: str) -> dict:
+    """Set a standing shop preference that persists across chats -- e.g.
+    default payment mode, preferred brand, shop name/GSTIN for invoices.
+    Use this when the owner says something like "always assume X" or
+    "remember that...".
+
+    Args:
+        key: The preference key.
+        value: The preference value.
+    """
+    return set_preference(key, value)
+
+
+def tool_get_sales_summary(date_from: Optional[str] = None, date_to: Optional[str] = None) -> dict:
+    """Get total sales, tax collected, cash/UPI/card split, and top items for
+    a date range (ISO 'YYYY-MM-DD' strings). Defaults to just today if no
+    dates are given.
+
+    Args:
+        date_from: Optional ISO start date.
+        date_to: Optional ISO end date.
+    """
+    return get_sales_summary(date_from, date_to)
+
+
+def tool_close_day(day: Optional[str] = None) -> dict:
+    """Get the closing sales report for one day, defaults to today.
+
+    Args:
+        day: Optional ISO date string.
+    """
+    return close_day(day)
 
 
 ALL_TOOLS = [
-    t_get_product_info, t_get_stock_level, t_get_low_stock_items, t_receive_stock,
-    t_start_bill, t_add_bill_item, t_remove_bill_item, t_get_bill_draft, t_finalize_bill,
-    t_get_customer_balance, t_charge_khata, t_record_khata_payment,
+    tool_get_product_info, tool_get_stock_level, tool_get_low_stock_items, tool_receive_stock,
+    tool_start_bill, tool_add_bill_item, tool_remove_bill_item, tool_get_bill_draft, tool_finalize_bill,
+    tool_get_customer_balance, tool_charge_khata, tool_record_khata_payment,
+    tool_get_preference, tool_set_preference, tool_get_sales_summary, tool_close_day,
 ]
-
-SERVER_NAME = "shop_tools"
-
-_shop_server = create_sdk_mcp_server(name=SERVER_NAME, version="1.0.0", tools=ALL_TOOLS)
-
-# mcp__<server_name>__<tool_name> is how the SDK identifies each tool.
-ALLOWED_TOOL_IDS = [f"mcp__{SERVER_NAME}__{t.name}" for t in ALL_TOOLS]
 
 SYSTEM_PROMPT = """You are the operations agent for an Indian kirana (grocery) store.
 The owner talks to you in plain, terse, real-shopkeeper English via Telegram.
@@ -144,6 +229,9 @@ mode, keep the bill in draft and just confirm what's in it so far.
 GUARDRAILS: if a tool call comes back with ok: false, relay the reason
 to the owner naturally (e.g. "only 6 left of that" for insufficient
 stock) -- never crash, never silently retry with a different number.
+For a below_cost error specifically: tell the owner the cost price and
+ask them to explicitly confirm before retrying with override_below_cost.
+Never set that override on your own judgment.
 
 AMBIGUITY: if a request is genuinely ambiguous (e.g. "add atta" when
 there's more than one kind), ask a short clarifying question rather
@@ -153,18 +241,23 @@ Keep replies short and conversational -- the owner is running a shop,
 not reading a report.
 """
 
+MODEL_NAME = "gemini-3.6-flash"
 
-def build_agent_options() -> ClaudeAgentOptions:
-    return ClaudeAgentOptions(
-        system_prompt=SYSTEM_PROMPT,
-        mcp_servers={SERVER_NAME: _shop_server},
-        # `tools` restricts which tools EXIST for this session at all --
-        # this is what keeps Claude's built-in Bash/Read/Write/WebFetch
-        # etc. out of reach entirely, not just "not pre-approved".
-        tools=ALLOWED_TOOL_IDS,
-        # `allowed_tools` additionally pre-approves them so they run
-        # without a permission prompt (which we can't answer anyway --
-        # nobody's watching a CLI for this headless bot).
-        allowed_tools=ALLOWED_TOOL_IDS,
-        permission_mode="bypassPermissions",
+# One shared client for the whole process. Chat SESSIONS (below) are what
+# hold per-conversation history -- the client itself is just a connection,
+# safe to reuse across every Telegram chat.
+_client = genai.Client()
+
+
+def new_chat_session():
+    """
+    Creates one fresh conversational session with all shop tools attached.
+    Call this once per Telegram chat_id and keep it around -- the `chats`
+    module keeps conversation history internally across send_message calls,
+    the same way ClaudeSDKClient did.
+    """
+    config = types.GenerateContentConfig(
+        system_instruction=SYSTEM_PROMPT,
+        tools=ALL_TOOLS,
     )
+    return _client.chats.create(model=MODEL_NAME, config=config)
