@@ -1,114 +1,155 @@
 # Supermarket Ops Agent
 
-A conversational operations agent for an Indian kirana store. The owner uses
-plain English through Telegram to manage inventory, build and finalize bills,
-track customer khata (credit), and generate business documents. PostgreSQL is
-the source of truth for products, stock, bills, customers, preferences, and
-audit trails.
+A conversational operations agent for an Indian kirana store. The owner runs the shop through **Telegram only**, using plain natural language to manage inventory, billing, GST, customer khata, daily sales, and business documents.
 
-## Harness
+PostgreSQL is the source of truth for products, stock, bills, customers, preferences, and audit trails.
 
-The agent uses Google's `google-genai` SDK with Gemini
-(`gemini-3.1-flash-lite`). The SDK receives typed Python functions as tools,
-automatically executes functions selected by the model, and returns the final
-natural-language response. Gemini was selected because Google AI Studio offers
-a free developer tier without requiring a payment card.
+## Live Demo
+
+**Telegram Bot:** `@nebula_kirana_bot`
+
+
+**Demo Video:** https://drive.google.com/file/d/1Bon1Pj6c1ofP72Np_l8biRfYTNmE71ql/view?usp=sharing
+
+The recording demonstrates the required flow:
+- Receive stock
+- Build and edit a multi-item bill
+- Oversell protection
+- Khata charge/payment cycle
+- Generate a GST invoice PDF
+- Generate the sales analysis PPTX
+- Set a preference
+- Start `/new` chat and verify the preference is remembered
+
+## Invoice Output
+
+The agent generates a real GST invoice PDF from a finalized bill, including product/HSN details, taxable value, CGST, SGST, and totals.
+
+![Generated Invoice](image.png)
+
+## Analysis Deck
+
+The agent can generate a PowerPoint sales-analysis deck containing store metrics, top-selling items, stock health, GST collected, and charts.
+
+## Harness & Control Loop
+
+The agent uses Google's `google-genai` SDK with **Gemini (`gemini-3.1-flash-lite`)**. Typed Python functions are exposed as model tools, allowing Gemini to decide which capabilities to call and to chain multiple tool calls within a single turn.
 
 The control loop is:
 
-1. Telegram receives a message.
-2. The bot loads shop preferences from PostgreSQL.
-3. Gemini observes the message and conversation history, reasons about the
-   request, and calls one or more tools.
-4. Tool results are fed back automatically until Gemini produces a response.
-5. The response is sent back to Telegram; generated PDFs/PPTX files are sent
-   as real Telegram documents.
+1. Telegram receives the owner's natural-language request.
+2. The bot loads persistent shop preferences from PostgreSQL.
+3. Gemini reasons over the request and conversation context.
+4. Gemini calls one or more typed tools as required.
+5. Tool results are fed back automatically until the task is complete.
+6. The final response is returned to Telegram, while generated PDFs/PPTX files are sent as real Telegram documents.
 
-## Telegram bot
+Gemini was chosen because Google AI Studio provides a free developer tier without requiring a payment card.
 
-The bot runs with Telegram long polling. Configure the username created with
-BotFather in the deployment or recording notes, for example `@your_store_bot`.
-The repository does not contain a bot token or username.
+## Key Features
 
-## Features
+- Natural-language product search without requiring the owner to know SKUs
+- Inventory receiving, stock lookup, and low-stock detection
+- Product creation with HSN and GST validation
+- Multi-turn bill creation and bill editing
+- GST-inclusive pricing with taxable value, CGST, SGST, and correct rounding
+- Authoritative oversell protection during finalization
+- Below-cost sale guardrail
+- Cash, UPI, Card, and Khata payment modes
+- Customer khata charges, payments, and balances
+- Daily sales and payment-mode summaries
+- GST-correct PDF invoice generation
+- PowerPoint sales-analysis deck generation with charts
+- Persistent shop preferences across `/new` conversations
+- Telegram update idempotency and mutation recovery after transient API failures
 
-- Search products by natural-language name instead of requiring SKUs.
-- Receive stock, inspect stock, and list low-stock items.
-- Add products with generated unique SKUs, required cost price, and validated
-  4-, 6-, or 8-digit HSN codes.
-- Build multi-turn draft bills, edit/remove lines, and show running totals.
-- Refuse overselling using both draft-time checks and an authoritative
-  transaction-time check.
-- Refuse below-cost sales unless the owner explicitly confirms an override.
-- Finalize bills using cash, UPI, card, or khata; only finalization changes
-  stock.
-- Track khata charges, payments, balances, and bill-linked credit sales.
-- Generate GST-correct PDF invoices with HSN, taxable value, CGST, SGST, and
-  totals.
-- Generate PowerPoint sales analysis decks with a native editable chart.
-- Report finalized sales, tax collected, payment-mode totals, and top items.
-- Persist shop preferences across `/new` conversations.
+## Hard Parts & Reliability
 
-## Tool and skill design
+- **Grounding:** Prices, GST, stock, and balances are retrieved from PostgreSQL through tools; the model is not allowed to invent them.
+- **Product resolution:** Natural-language names are resolved through product search before SKU-based operations. Ambiguous matches are clarified rather than guessed.
+- **Oversell protection:** Stock is checked during draft creation and re-checked authoritatively during finalization.
+- **GST correctness:** Each bill line retains its GST/HSN information. GST-inclusive prices are split into taxable value, CGST, and SGST using `Decimal` with round-half-up.
+- **Multi-turn billing:** Bills remain drafts while being built and can be edited. Stock is changed only when the bill is finalized.
+- **Idempotency:** Telegram `update_id` values prevent duplicate processing. Khata mutations use idempotency keys, and finalized bills are safe to replay.
+- **Concurrency:** Finalization locks involved product rows in a consistent order and checks aggregate demand before changing stock.
+- **Guardrails:** Missing/invalid HSN information, missing prices, unknown khata customers, overselling, and below-cost sales are refused or require the appropriate confirmation.
+- **Persistence:** Shop data and preferences live in PostgreSQL and survive `/new` and process restarts.
+- **Transient failures:** If a mutation commits before a downstream Gemini/API failure, the bot reports the committed action rather than asking the owner to repeat it.
 
-The model-facing wrappers live in [bot/agent.py](bot/agent.py). Database-backed
-domain logic stays in small, testable modules:
+## Tool & Skill Design
 
-- [tools/inventory.py](tools/inventory.py): product search, product creation,
-  stock receiving, stock levels, HSN validation, and low-stock queries.
-- [tools/billing.py](tools/billing.py): draft lifecycle, GST calculations,
-  below-cost checks, oversell protection, and finalization.
-- [tools/khata.py](tools/khata.py): customer balances, credit charges, and
-  payments with idempotency keys.
-- [tools/analytics.py](tools/analytics.py): finalized-sales summaries and
-  day-closing reports.
-- [tools/documents.py](tools/documents.py): PDF invoices and PPTX analysis
-  decks.
-- [tools/preferences.py](tools/preferences.py): persistent shop settings.
-- [skills/gst_rules.md](skills/gst_rules.md) and
-  [skills/khata_rules.md](skills/khata_rules.md): domain guidance supplied to
-  the agent; enforcement remains in the Python tools and database.
+The model-facing wrappers are in [`bot/agent.py`](bot/agent.py). Business logic is kept in small database-backed modules:
 
-## Reliability and guardrails
+| Module | Responsibility |
+|---|---|
+| `tools/inventory.py` | Product search, product creation, stock receiving, stock levels, HSN validation, low-stock queries |
+| `tools/billing.py` | Bill lifecycle, GST calculations, below-cost checks, oversell protection, finalization |
+| `tools/khata.py` | Customer balances, credit charges, payments, idempotency |
+| `tools/analytics.py` | Sales summaries and daily closing |
+| `tools/documents.py` | GST invoice PDFs and PPTX analysis decks |
+| `tools/preferences.py` | Persistent shop preferences |
+| `skills/gst_rules.md` | GST/domain guidance |
+| `skills/khata_rules.md` | Khata/domain guidance |
 
-- **Grounding:** prices, stock, and balances must come from a tool call in the
-  current turn; the agent must not guess numbers.
-- **Product resolution:** name search happens before SKU-based operations, and
-  ambiguous matches are clarified instead of guessed.
-- **GST correctness:** product GST/HSN is stored with each bill line; inclusive
-  prices are split into taxable value, CGST, and SGST using `Decimal` and
-  round-half-up.
-- **Draft safety:** editing a bill only changes draft rows. Stock changes only
-  during `finalize_bill`.
-- **Oversell and concurrency:** finalization locks involved product rows in a
-  consistent order, aggregates demand by product, and rolls back the whole
-  transaction if any item is short.
-- **Idempotency:** finalized bills, khata mutations, and Telegram
-  `update_id` values are protected against duplicate processing.
-- **Guardrails:** invalid HSN placeholders, missing prices, unknown payment
-  customers, and below-cost sales are refused with actionable errors.
-- **Cross-session memory:** conversation history is per Telegram chat, while
-  shop data and preferences remain in PostgreSQL and survive `/new` or a
-  process restart.
-- **Transient failures:** API errors after a mutation report the committed
-  result rather than asking the owner to repeat a potentially duplicate action.
+Business rules are enforced in the tools/database layer rather than relying only on prompt instructions.
+
+## Tech Stack
+
+- **Interface:** Telegram Bot API
+- **Agent:** Google `google-genai` SDK + Gemini
+- **Backend:** Python
+- **Database:** PostgreSQL
+- **Documents:** PDF invoices + PPTX analysis decks
+- **Deployment:** Railway
+- **Testing:** pytest
+
+## Project Structure
+
+```text
+supermarket-ops-agent/
+├── bot/
+│   ├── agent.py
+│   └── main.py
+├── db/
+│   ├── connection.py
+│   ├── schema.sql
+│   └── seed.sql
+├── tools/
+│   ├── inventory.py
+│   ├── billing.py
+│   ├── khata.py
+│   ├── analytics.py
+│   ├── documents.py
+│   └── preferences.py
+├── skills/
+│   ├── gst_rules.md
+│   └── khata_rules.md
+├── tests/
+├── docs/
+│   ├── invoice-screenshot.png
+│   └── analysis-deck-screenshot.png
+├── requirements.txt
+├── .env.example
+└── README.md
+```
 
 ## Setup
 
-Requirements: Python 3.10+ and a PostgreSQL database (Neon, Supabase,
-Railway, or a local PostgreSQL instance).
+Requirements: Python 3.10+ and PostgreSQL.
 
 ```bash
 python -m venv venv
+
 # Windows
 venv\Scripts\activate
+
 # macOS/Linux
 source venv/bin/activate
 
 pip install -r requirements.txt
 ```
 
-Copy `.env.example` to `.env` and set:
+Configure:
 
 ```dotenv
 TELEGRAM_BOT_TOKEN=...
@@ -123,24 +164,24 @@ psql "$DATABASE_URL" -f db/schema.sql
 psql "$DATABASE_URL" -f db/seed.sql
 ```
 
-Run the bot from the repository root as a module:
+Run:
 
 ```bash
 python -m bot.main
 ```
 
-Do not run `python bot/main.py`; module execution preserves the package
-imports used by the tools and database modules.
+For Railway or another worker platform, use:
 
-For Railway, Render, or another worker platform, use `python -m bot.main` as
-the start command. This is a background worker using Telegram long polling,
-not an HTTP web service.
+```bash
+python -m bot.main
+```
 
-## Example conversations
+This application uses Telegram long polling and therefore runs as a background worker rather than an HTTP web service.
+
+## Example Conversation
 
 ```text
 50 packets of Maggi came in, cost ₹12, MRP ₹14
-new item: Amul Butter 100g, GST 5%, MRP ₹62
 make a bill: 2kg sugar, 1 Aashirvaad atta 5kg, 4 Maggi, UPI
 actually make the Maggi 6
 finalize
@@ -150,19 +191,24 @@ Ramesh's balance?
 Ramesh paid ₹300
 show today's sales
 make a sales analysis deck
+always assume UPI unless I say cash
+/new
 ```
 
-An invoice can only be generated for a finalized bill. A bill mentioning a
-payment mode is kept as a draft until the owner explicitly asks to finalize.
+An invoice can only be generated for a finalized bill. A payment mode mentioned during bill creation does not itself finalize the sale.
+
+## Submission Links
+
+- **Telegram Bot:** `@nebula_kirana_bot`
+- **Demo Recording:** https://drive.google.com/file/d/1Bon1Pj6c1ofP72Np_l8biRfYTNmE71ql/view?usp=sharing
+- **GitHub Repository:** `https://github.com/karthikasri-18/supermarket-ops-agent.git`
 
 ## Testing
 
-With a configured test database, run:
+With a configured test database:
 
 ```bash
 pytest
 ```
 
-The tests cover GST slabs and rounding, product search, below-cost protection,
-overselling, cumulative quantities in a draft, idempotent finalization, and
-concurrent finalization.
+Tests cover GST slabs and rounding, product search, below-cost protection, overselling, cumulative quantities in drafts, idempotent finalization, and concurrent finalization.
