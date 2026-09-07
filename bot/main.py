@@ -96,8 +96,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         raise
 
     reply_text = (response.text or "").strip()
-    if reply_text:
-        await update.message.reply_text(reply_text)
+    if not reply_text:
+        # response.text comes back empty when the model's turn ended with
+        # an unresolved function_call instead of final text (e.g. hit the
+        # automatic-function-calling cap). Silence here looks like a hang
+        # from the owner's side -- say something instead of nothing.
+        reply_text = "Sorry, I got stuck partway through that -- could you try again or rephrase?"
+    await update.message.reply_text(reply_text)
 
 
 async def handle_new_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

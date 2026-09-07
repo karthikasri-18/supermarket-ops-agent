@@ -287,5 +287,12 @@ def new_chat_session():
     config = types.GenerateContentConfig(
         system_instruction=SYSTEM_PROMPT,
         tools=ALL_TOOLS,
+        # Default automatic-function-calling caps how many tool calls the
+        # SDK will chain in a single turn before giving up and returning
+        # an unresolved function_call part instead of final text. Raised
+        # here after seeing that happen on a long-running session.
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(
+            maximum_remote_calls=20
+        ),
     )
     return _client.chats.create(model=MODEL_NAME, config=config)
