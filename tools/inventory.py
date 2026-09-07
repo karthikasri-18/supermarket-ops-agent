@@ -10,6 +10,8 @@ for now means we can pytest them directly.
 import re
 from db.connection import get_connection
 
+HSN_CODE_PATTERN = re.compile(r"^\d{4}(\d{2}(\d{2})?)?$")  # 4, 6, or 8 digits only
+
 
 def _slugify_sku(name: str) -> str:
     """Turns 'Amul Butter 100g' into 'AMUL-BUTTER-100G' for an
@@ -114,11 +116,27 @@ def add_product(name: str, hsn_code: str, gst_rate: float, unit: str,
     owner hasn't stated a cost price, ask for it rather than calling
     this with a guessed value.
 
+    hsn_code is also required and must be a real 4/6/8-digit numeric
+    HSN code -- if this call returns error="invalid_hsn_code", do NOT
+    retry with a made-up value of any kind (a fake number, a word like
+    "pending" or "ask_owner", anything). Ask the owner for the actual
+    HSN code instead, then retry with what they say.
+
     Returns {"ok": True, "sku": ..., "product_id": ...} or
-    {"ok": False, "error": "invalid_name" | "invalid_price"}.
+    {"ok": False, "error": "invalid_name" | "invalid_price" | "invalid_hsn_code"}.
     """
     if not name or not name.strip():
         return {"ok": False, "error": "invalid_name"}
+    if not hsn_code or not HSN_CODE_PATTERN.match(hsn_code.strip()):
+        return {
+            "ok": False,
+            "error": "invalid_hsn_code",
+            "detail": (
+                "hsn_code must be a real 4, 6, or 8-digit numeric HSN code "
+                "(e.g. '0405' or '04051000') -- not a placeholder or guess. "
+                "Ask the owner for the actual code."
+            ),
+        }
     if mrp is None or cost_price is None or mrp <= 0 or cost_price <= 0:
         return {
             "ok": False,

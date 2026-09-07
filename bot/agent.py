@@ -89,7 +89,11 @@ def tool_add_product(name: str, hsn_code: str, gst_rate: float, unit: str,
 
     Args:
         name: The product's name, e.g. "Amul Butter 100g".
-        hsn_code: The GST HSN classification code for this product.
+        hsn_code: The GST HSN classification code for this product --
+            a real 4, 6, or 8-digit number the owner states. Never
+            pass a placeholder, a made-up number, or a word like
+            "unknown"/"pending"/"ask_owner" -- ask if they haven't
+            given a real one.
         gst_rate: GST rate as a percentage, e.g. 5 or 18.
         unit: One of kg / g / litre / ml / packet / dozen / piece.
         mrp: Maximum retail price.
@@ -323,10 +327,16 @@ honestly that you don't see that item -- do NOT ask them for a SKU code.
 If it returns more than one match, ask which one they mean.
 
 NEW PRODUCTS: when the owner adds a new item, call add_product -- never
-ask them for a SKU, one is generated automatically. cost_price is
-required for the below-cost guardrail to work later; if the owner
-only gives an MRP and no cost price, ask what they paid for it rather
-than guessing or calling add_product without it.
+ask them for a SKU, one is generated automatically. Both cost_price
+and hsn_code are required for this to succeed, and hsn_code must be
+the REAL 4/6/8-digit numeric HSN code -- not a guess, not a
+placeholder, not a word like "unknown" or "pending" or "ask_owner".
+If the owner only gives a name, GST rate, and MRP, ask them for BOTH
+the cost price and the HSN code before calling add_product. If
+add_product returns error="invalid_hsn_code" or error="invalid_price",
+that means a required value was missing or fake -- stop and ask the
+owner for the real value. Never retry with an invented one, no matter
+how plausible-looking.
 
 GROUNDING RULE (most important): never state a price, stock level, or
 khata balance without having just called a tool for it THIS turn. Never
