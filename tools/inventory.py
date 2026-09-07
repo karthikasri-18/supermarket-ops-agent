@@ -7,7 +7,17 @@ These get wrapped as agent tools in Day 2. Keeping them plain
 for now means we can pytest them directly.
 """
 
+import re
 from db.connection import get_connection
+
+
+def _slugify_sku(name: str) -> str:
+    """Turns 'Amul Butter 100g' into 'AMUL-BUTTER-100G' for an
+    auto-generated SKU -- the owner never says a SKU when adding a
+    new product ("new item: Amul Butter 100g, GST 12%, MRP ₹62"),
+    so we have to make one up ourselves."""
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-").upper()
+    return slug or "PRODUCT"
 
 
 def get_product_by_sku(sku: str) -> dict:
@@ -82,6 +92,76 @@ def get_low_stock_items() -> dict:
         )
         rows = [dict(r) for r in cur.fetchall()]
         return {"ok": True, "items": rows, "count": len(rows)}
+
+
+def add_product(name: str, hsn_code: str, gst_rate: float, unit: str,
+                 mrp: float, cost_price: float, is_loose: bool = False,
+                 sell_price: float = None, reorder_level: float = 0) -> dict:
+    """
+    Registers a brand new product the shop wants to start stocking --
+    e.g. "new item: Amul Butter 100g, GST 12%, MRP 62". Starts at 0
+    stock on purpose: adding a product and receiving stock of it are
+    two separate real-world actions (a new line can be listed before
+    the first delivery arrives) -- call receive_stock separately once
+    it actually comes in.
+
+    The owner never gives a SKU code (they don't know what one is),
+    so one is generated automatically from the product name and made
+    unique if it collides with an existing SKU.
+
+    cost_price is required, not optional: without it the below-cost
+    guardrail on billing can't function for this product. If the
+    owner hasn't stated a cost price, ask for it rather than calling
+    this with a guessed value.
+
+    Returns {"ok": True, "sku": ..., "product_id": ...} or
+    {"ok": False, "error": "invalid_name" | "invalid_price"}.
+    """
+    if not name or not name.strip():
+        return {"ok": False, "error": "invalid_name"}
+    if mrp is None or cost_price is None or mrp <= 0 or cost_price <= 0:
+        return {
+            "ok": False,
+            "error": "invalid_price",
+            "detail": "mrp and cost_price are both required and must be positive",
+        }
+
+    final_sell_price = sell_price if sell_price is not None else mrp
+
+    with get_connection() as cur:
+        # Auto-generate a SKU from the name, then guarantee uniqueness
+        # by appending a numeric suffix on collision (e.g. a second
+        # "Amul Butter" variant added later).
+        base_sku = _slugify_sku(name)
+        candidate_sku = base_sku
+        suffix = 1
+        while True:
+            cur.execute("SELECT 1 FROM products WHERE sku = %s", (candidate_sku,))
+            if cur.fetchone() is None:
+                break
+            suffix += 1
+            candidate_sku = f"{base_sku}-{suffix}"
+
+        cur.execute(
+            """
+            INSERT INTO products
+                (sku, name, hsn_code, gst_rate, unit, is_loose,
+                 cost_price, mrp, sell_price, quantity_on_hand, reorder_level)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 0, %s)
+            RETURNING id
+            """,
+            (candidate_sku, name, hsn_code, gst_rate, unit, is_loose,
+             cost_price, mrp, final_sell_price, reorder_level),
+        )
+        product_id = cur.fetchone()["id"]
+
+        return {
+            "ok": True,
+            "product_id": product_id,
+            "sku": candidate_sku,
+            "name": name,
+            "quantity_on_hand": 0.0,
+        }
 
 
 def receive_stock(sku: str, qty: float, cost_price: float = None) -> dict:

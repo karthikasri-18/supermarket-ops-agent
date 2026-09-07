@@ -26,7 +26,7 @@ from typing import Optional
 from google import genai
 from google.genai import types
 
-from tools.inventory import receive_stock, get_stock_level, get_low_stock_items, get_product_by_sku, search_products
+from tools.inventory import add_product, receive_stock, get_stock_level, get_low_stock_items, get_product_by_sku, search_products
 from tools.billing import start_bill, add_bill_item, remove_bill_item, get_bill_draft, finalize_bill
 from tools.khata import get_customer_balance, charge_khata, record_khata_payment
 from tools.preferences import get_preference, set_preference
@@ -76,6 +76,33 @@ def tool_get_stock_level(sku: str) -> dict:
 def tool_get_low_stock_items() -> dict:
     """List all products at or below their reorder level."""
     return get_low_stock_items()
+
+
+def tool_add_product(name: str, hsn_code: str, gst_rate: float, unit: str,
+                      mrp: float, cost_price: float, is_loose: bool = False,
+                      sell_price: Optional[float] = None,
+                      reorder_level: float = 0) -> dict:
+    """Register a brand new product the shop wants to start stocking.
+    A SKU is generated automatically from the name -- never ask the
+    owner for one. Starts at 0 stock; call receive_stock separately
+    once it actually arrives.
+
+    Args:
+        name: The product's name, e.g. "Amul Butter 100g".
+        hsn_code: The GST HSN classification code for this product.
+        gst_rate: GST rate as a percentage, e.g. 5 or 18.
+        unit: One of kg / g / litre / ml / packet / dozen / piece.
+        mrp: Maximum retail price.
+        cost_price: What the shop pays for this product. Required --
+            if the owner hasn't stated one, ask before calling this.
+        is_loose: True for loose/unpackaged items sold by weight.
+        sell_price: Optional selling price if different from MRP;
+            defaults to MRP.
+        reorder_level: Optional stock threshold for low-stock alerts.
+    """
+    return add_product(name, hsn_code, gst_rate, unit, mrp, cost_price,
+                        is_loose=is_loose, sell_price=sell_price,
+                        reorder_level=reorder_level)
 
 
 def tool_receive_stock(sku: str, qty: float, cost_price: Optional[float] = None) -> dict:
@@ -269,7 +296,8 @@ def tool_generate_analysis_deck(date_from: Optional[str] = None, date_to: Option
 
 
 ALL_TOOLS = [
-    tool_get_product_info, tool_search_products, tool_get_stock_level, tool_get_low_stock_items, tool_receive_stock,
+    tool_get_product_info, tool_search_products, tool_get_stock_level, tool_get_low_stock_items,
+    tool_add_product, tool_receive_stock,
     tool_start_bill, tool_add_bill_item, tool_remove_bill_item, tool_get_bill_draft, tool_finalize_bill,
     tool_get_customer_balance, tool_charge_khata, tool_record_khata_payment,
     tool_get_preference, tool_set_preference, tool_get_sales_summary, tool_close_day,
@@ -294,6 +322,12 @@ product/stock/billing tool. If it returns zero matches, tell the owner
 honestly that you don't see that item -- do NOT ask them for a SKU code.
 If it returns more than one match, ask which one they mean.
 
+NEW PRODUCTS: when the owner adds a new item, call add_product -- never
+ask them for a SKU, one is generated automatically. cost_price is
+required for the below-cost guardrail to work later; if the owner
+only gives an MRP and no cost price, ask what they paid for it rather
+than guessing or calling add_product without it.
+
 GROUNDING RULE (most important): never state a price, stock level, or
 khata balance without having just called a tool for it THIS turn. Never
 guess or invent a number. If you don't have a tool result for it, call
@@ -308,6 +342,19 @@ finalize. Only finalize when the owner explicitly says so afterward
 (e.g. "that's it", "finalize", "done", "total please"). If they haven't
 said that, keep the bill in draft, summarize what's in it so far, and
 ask if they want to finalize -- don't finalize on your own judgment.
+
+KHATA ON A BILL: if a bill is being finalized with payment_mode="khata",
+that sale must ALSO be put on that customer's khata balance -- a khata
+sale that never touches charge_khata is a shop bug, not a valid state.
+Concretely: before calling finalize_bill with payment_mode="khata", you
+must already know WHOSE khata it's going on. If the owner hasn't named
+a customer for this bill, ask "whose khata should this go on?" before
+finalizing -- do not finalize a khata sale with no customer attached.
+Once finalize_bill succeeds, immediately call charge_khata for that
+customer with the bill's total amount, in the same turn, before
+replying -- the owner said "khata" once, not twice, and should not
+have to separately say "put it on X's credit" for a sale you already
+know is going on credit.
 
 GUARDRAILS: if a tool call comes back with ok: false, relay the reason
 to the owner naturally (e.g. "only 6 left of that" for insufficient

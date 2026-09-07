@@ -111,6 +111,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_document(document=f)
 
 
+async def handle_network_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Registered error handler. Without this, PTB just logs a full traceback
+    for every transient network hiccup during long-polling's get_updates
+    (e.g. a brief WiFi drop) -- alarming, but PTB's own retry loop already
+    recovers from these on its own. This handler exists so that:
+      1. Real errors get one clean log line instead of a wall of traceback
+      2. Errors we can't recover from tell the owner via Telegram, rather
+         than silently vanishing
+    """
+    from telegram.error import NetworkError
+    if isinstance(context.error, NetworkError):
+        print(f"[transient network error, retrying automatically] {context.error}")
+        return
+    print(f"[unhandled error] {context.error}")
+    if isinstance(update, Update) and update.effective_message:
+        await update.effective_message.reply_text(
+            "Something went wrong on my end -- please try that again."
+        )
+
+
 async def handle_new_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /new -- discards this chat's conversation history so we can prove
@@ -134,6 +155,7 @@ def main():
     )
     app.add_handler(CommandHandler("new", handle_new_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_error_handler(handle_network_error)
     print("Bot is running. Press Ctrl+C to stop.")
     app.run_polling()
 

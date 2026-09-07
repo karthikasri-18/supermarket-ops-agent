@@ -58,11 +58,12 @@ def generate_invoice_pdf(bill_id: int) -> dict:
     elements.append(Paragraph(f"Invoice for Bill #{bill_id}", styles["Heading2"]))
     elements.append(Spacer(1, 10))
 
-    table_data = [["Item", "Qty", "Rate", "Taxable Value", "CGST", "SGST", "Total"]]
+    table_data = [["Item", "HSN", "Qty", "Rate", "Taxable Value", "CGST", "SGST", "Total"]]
     for item in bill["items"]:
         taxable = item["line_total"] - item["cgst_amt"] - item["sgst_amt"]
         table_data.append([
             item["name"],
+            item["hsn_code"],
             f'{item["qty"]:g}',
             f'{item["unit_price"]:.2f}',
             f'{taxable:.2f}',
@@ -70,7 +71,7 @@ def generate_invoice_pdf(bill_id: int) -> dict:
             f'{item["sgst_amt"]:.2f}',
             f'{item["line_total"]:.2f}',
         ])
-    table_data.append(["", "", "", "", "", "Total", f'{bill["total"]:.2f}'])
+    table_data.append(["", "", "", "", "", "", "Total", f'{bill["total"]:.2f}'])
 
     table = Table(table_data, repeatRows=1)
     table.setStyle(TableStyle([

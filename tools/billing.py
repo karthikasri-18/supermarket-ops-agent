@@ -175,7 +175,7 @@ def _fetch_bill_draft(cur, bill_id: int) -> dict:
 
     cur.execute(
         """
-        SELECT bi.id AS bill_item_id, p.sku, p.name, bi.qty, bi.unit_price,
+        SELECT bi.id AS bill_item_id, p.sku, p.name, p.hsn_code, bi.qty, bi.unit_price,
                bi.gst_rate, bi.cgst_amt, bi.sgst_amt, bi.line_total
         FROM bill_items bi
         JOIN products p ON p.id = bi.product_id
