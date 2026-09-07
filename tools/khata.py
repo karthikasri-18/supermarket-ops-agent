@@ -9,6 +9,13 @@ behind it.
 Functions take a customer NAME (not an id) because that's how the
 owner actually talks -- "put 500 on Ramesh's credit". We look up
 or create the customer row internally.
+
+idempotency_key: both mutating functions accept this. It is NOT
+supplied by the model -- bot/agent.py injects it from Telegram's
+update_id before the tool runs. This is what makes a retried Telegram
+update (or a retried agent turn) safe: the second attempt sees a
+khata_transactions row already sitting under that key and returns the
+cached result instead of moving the balance again.
 """
 
 from db.connection import get_connection
@@ -35,7 +42,18 @@ def get_customer_balance(name: str) -> dict:
         return {"ok": True, "name": customer["name"], "khata_balance": float(customer["khata_balance"])}
 
 
-def charge_khata(name: str, amount: float, ref_bill_id: int = None) -> dict:
+def _find_existing_by_key(cur, idempotency_key: str):
+    if not idempotency_key:
+        return None
+    cur.execute(
+        "SELECT * FROM khata_transactions WHERE idempotency_key = %s",
+        (idempotency_key,),
+    )
+    return cur.fetchone()
+
+
+def charge_khata(name: str, amount: float, ref_bill_id: int = None,
+                  idempotency_key: str = None) -> dict:
     """
     Customer buys on credit -- balance goes UP (they owe more).
     Creates the customer if this is their first time on khata.
@@ -44,10 +62,17 @@ def charge_khata(name: str, amount: float, ref_bill_id: int = None) -> dict:
         return {"ok": False, "error": "invalid_amount", "detail": "amount must be positive"}
 
     with get_connection() as cur:
-        # Lock the customer row (or the freshly-created one) before
-        # updating -- same reasoning as receive_stock: two khata
-        # charges for the same customer at once shouldn't clobber
-        # each other's balance update.
+        existing = _find_existing_by_key(cur, idempotency_key)
+        if existing is not None:
+            cur.execute("SELECT khata_balance FROM customers WHERE id = %s", (existing["customer_id"],))
+            return {
+                "ok": True, "name": name, "charged": float(existing["amount"]),
+                "new_balance": float(cur.fetchone()["khata_balance"]),
+                "already_recorded": True,
+            }
+
+        # Lock the customer row before updating -- two khata charges
+        # for the same customer at once shouldn't clobber each other.
         customer = _get_or_create_customer(cur, name)
         cur.execute("SELECT * FROM customers WHERE id = %s FOR UPDATE", (customer["id"],))
         customer = cur.fetchone()
@@ -58,14 +83,15 @@ def charge_khata(name: str, amount: float, ref_bill_id: int = None) -> dict:
             (new_balance, customer["id"]),
         )
         cur.execute(
-            "INSERT INTO khata_transactions (customer_id, amount, type, ref_bill_id) "
-            "VALUES (%s, %s, 'charge', %s)",
-            (customer["id"], amount, ref_bill_id),
+            "INSERT INTO khata_transactions (customer_id, amount, type, ref_bill_id, idempotency_key) "
+            "VALUES (%s, %s, 'charge', %s, %s)",
+            (customer["id"], amount, ref_bill_id, idempotency_key),
         )
-        return {"ok": True, "name": name, "charged": amount, "new_balance": new_balance}
+        return {"ok": True, "name": name, "charged": amount, "new_balance": new_balance,
+                "already_recorded": False}
 
 
-def record_khata_payment(name: str, amount: float) -> dict:
+def record_khata_payment(name: str, amount: float, idempotency_key: str = None) -> dict:
     """
     Customer pays back some/all of what they owe -- balance goes
     DOWN. Refuses if the customer doesn't exist (can't settle a
@@ -75,6 +101,15 @@ def record_khata_payment(name: str, amount: float) -> dict:
         return {"ok": False, "error": "invalid_amount", "detail": "amount must be positive"}
 
     with get_connection() as cur:
+        existing = _find_existing_by_key(cur, idempotency_key)
+        if existing is not None:
+            cur.execute("SELECT khata_balance FROM customers WHERE id = %s", (existing["customer_id"],))
+            return {
+                "ok": True, "name": name, "paid": float(existing["amount"]),
+                "new_balance": float(cur.fetchone()["khata_balance"]),
+                "already_recorded": True,
+            }
+
         cur.execute("SELECT * FROM customers WHERE name = %s FOR UPDATE", (name,))
         customer = cur.fetchone()
         if customer is None:
@@ -86,7 +121,9 @@ def record_khata_payment(name: str, amount: float) -> dict:
             (new_balance, customer["id"]),
         )
         cur.execute(
-            "INSERT INTO khata_transactions (customer_id, amount, type) VALUES (%s, %s, 'payment')",
-            (customer["id"], amount),
+            "INSERT INTO khata_transactions (customer_id, amount, type, idempotency_key) "
+            "VALUES (%s, %s, 'payment', %s)",
+            (customer["id"], amount, idempotency_key),
         )
-        return {"ok": True, "name": name, "paid": amount, "new_balance": new_balance}
+        return {"ok": True, "name": name, "paid": amount, "new_balance": new_balance,
+                "already_recorded": False}

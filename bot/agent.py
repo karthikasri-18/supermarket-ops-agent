@@ -39,6 +39,23 @@ from tools.documents import generate_invoice_pdf, generate_analysis_deck
 # "Args:" docstring section directly to build each tool's schema --
 # so this isn't just documentation, the wording actually matters.
 
+import contextvars
+
+# Set once per incoming Telegram update, before the agent turn runs --
+# see set_current_update_id() below. Tool wrappers read from this
+# rather than trusting the model to pass an idempotency key itself,
+# since the model can't be relied on to remember or invent one
+# correctly under retry.
+_current_update_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "current_update_id", default=None
+)
+
+
+def set_current_update_id(update_id) -> None:
+    """Call this from bot/main.py at the start of handling each
+    Telegram update, before calling chat.send_message()."""
+    _current_update_id.set(str(update_id))
+
 def tool_get_product_info(sku: str) -> dict:
     """Look up a product's details (price, GST rate, stock) by SKU.
 
@@ -197,7 +214,7 @@ def tool_charge_khata(name: str, amount: float) -> dict:
         name: The customer's name.
         amount: Amount to charge, must be positive.
     """
-    return charge_khata(name, amount)
+    return charge_khata(name, amount, idempotency_key=_current_update_id.get())
 
 
 def tool_record_khata_payment(name: str, amount: float) -> dict:
@@ -207,7 +224,7 @@ def tool_record_khata_payment(name: str, amount: float) -> dict:
         name: The customer's name.
         amount: Amount paid, must be positive.
     """
-    return record_khata_payment(name, amount)
+    return record_khata_payment(name, amount, idempotency_key=_current_update_id.get())
 
 
 def tool_get_preference(key: str) -> dict:

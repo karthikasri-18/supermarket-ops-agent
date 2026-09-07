@@ -23,7 +23,7 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, ContextTypes, filters
 from google.genai.errors import ClientError
 
-from bot.agent import new_chat_session, pop_last_generated_file
+from bot.agent import new_chat_session, pop_last_generated_file, set_current_update_id, pop_last_mutation
 from db.connection import get_connection
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -78,6 +78,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prefs_line = "; ".join(f"{k}={v}" for k, v in prefs.items()) or "(none set)"
     message_with_context = f"[Shop preferences: {prefs_line}]\n\n{user_text}"
 
+    # Feeds tools/khata.py's idempotency_key for this turn -- if a
+    # mutating tool runs, this is the key it's stored under, so a
+    # genuine Telegram-level redelivery of this same update_id can't
+    # double-apply it.
+    set_current_update_id(update.update_id)
+
     session = get_session_for_chat(chat_id)
     # session.send_message is a blocking call (network + our own blocking
     # DB calls inside tool execution) -- run it in a thread so it doesn't
@@ -85,15 +91,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         response = await asyncio.to_thread(session.send_message, message_with_context)
     except ClientError as e:
+        # A mutating tool (khata charge/payment, finalize_bill) can commit
+        # to Postgres and THEN the turn can still fail on the later
+        # round-trip to Gemini for final reply text -- automatic function
+        # calling executes tools before that final text comes back. If
+        # that happened, say so plainly instead of a blind "try again",
+        # which is what caused the double-payment: the owner retried an
+        # action that had actually already gone through.
+        mutation = pop_last_mutation()
+        if mutation:
+            await update.message.reply_text(
+                f"{mutation}\n\n(Then hit a connection hiccup after that, so this may look "
+                f"like an error, but the action above did go through -- no need to repeat it.)"
+            )
+            return
         if getattr(e, "code", None) == 429:
-            # Free-tier rate limit hit -- tell the owner plainly instead of
-            # crashing with a raw traceback. This is a real, expected
-            # situation on a free API tier, not a bug to hide.
             await update.message.reply_text(
                 "Hit the free API rate limit for a moment -- please wait a bit and try again."
             )
             return
-        raise
+        # Any other API error (503 etc.) with nothing committed -- safe to
+        # tell the owner to just retry.
+        await update.message.reply_text(
+            "Hit a temporary connection issue -- please try that again."
+        )
+        return
 
     reply_text = (response.text or "").strip()
     if not reply_text:
@@ -101,7 +123,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # an unresolved function_call instead of final text (e.g. hit the
         # automatic-function-calling cap). Silence here looks like a hang
         # from the owner's side -- say something instead of nothing.
-        reply_text = "Sorry, I got stuck partway through that -- could you try again or rephrase?"
+        mutation = pop_last_mutation()
+        reply_text = mutation or "Sorry, I got stuck partway through that -- could you try again or rephrase?"
     await update.message.reply_text(reply_text)
 
     # If a document tool ran this turn, send the actual file too.
