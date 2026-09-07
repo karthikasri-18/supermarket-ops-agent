@@ -23,7 +23,7 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, ContextTypes, filters
 from google.genai.errors import ClientError
 
-from bot.agent import new_chat_session
+from bot.agent import new_chat_session, pop_last_generated_file
 from db.connection import get_connection
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -103,6 +103,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # from the owner's side -- say something instead of nothing.
         reply_text = "Sorry, I got stuck partway through that -- could you try again or rephrase?"
     await update.message.reply_text(reply_text)
+
+    # If a document tool ran this turn, send the actual file too.
+    file_path = pop_last_generated_file()
+    if file_path:
+        with open(file_path, "rb") as f:
+            await update.message.reply_document(document=f)
 
 
 async def handle_new_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

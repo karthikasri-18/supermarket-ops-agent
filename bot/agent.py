@@ -31,6 +31,7 @@ from tools.billing import start_bill, add_bill_item, remove_bill_item, get_bill_
 from tools.khata import get_customer_balance, charge_khata, record_khata_payment
 from tools.preferences import get_preference, set_preference
 from tools.analytics import get_sales_summary, close_day
+from tools.documents import generate_invoice_pdf, generate_analysis_deck
 
 
 # ---------- tool wrappers ----------
@@ -221,15 +222,69 @@ def tool_close_day(day: Optional[str] = None) -> dict:
     return close_day(day)
 
 
+# ---------- document tools ----------
+# Automatic function calling only surfaces final TEXT back to our own
+# code -- not the raw tool results -- so there's no built-in way to get
+# a generated file's path back out to bot/main.py for sending as an
+# actual Telegram document. This module-level tracker is the hand-off:
+# the wrapper below records the path when a document tool runs, and
+# bot/main.py drains it via pop_last_generated_file() right after each
+# reply. Fine for a single-shop-owner bot; would need per-chat tracking
+# for many concurrent users.
+_last_generated_file = {"path": None}
+
+
+def pop_last_generated_file():
+    path = _last_generated_file["path"]
+    _last_generated_file["path"] = None
+    return path
+
+
+def tool_generate_invoice_pdf(bill_id: int) -> dict:
+    """Generate a GST-correct PDF invoice for a bill. The bill must
+    already be finalized -- an unfinalized draft has no real sale to
+    invoice yet.
+
+    Args:
+        bill_id: The bill's id.
+    """
+    result = generate_invoice_pdf(bill_id)
+    if result.get("ok") and result.get("file_path"):
+        _last_generated_file["path"] = result["file_path"]
+    return result
+
+
+def tool_generate_analysis_deck(date_from: Optional[str] = None, date_to: Optional[str] = None) -> dict:
+    """Generate a PowerPoint sales analysis deck (with a real chart) for
+    a date range. Defaults to today if no dates given.
+
+    Args:
+        date_from: Optional ISO start date.
+        date_to: Optional ISO end date.
+    """
+    result = generate_analysis_deck(date_from, date_to)
+    if result.get("ok") and result.get("file_path"):
+        _last_generated_file["path"] = result["file_path"]
+    return result
+
+
 ALL_TOOLS = [
     tool_get_product_info, tool_search_products, tool_get_stock_level, tool_get_low_stock_items, tool_receive_stock,
     tool_start_bill, tool_add_bill_item, tool_remove_bill_item, tool_get_bill_draft, tool_finalize_bill,
     tool_get_customer_balance, tool_charge_khata, tool_record_khata_payment,
     tool_get_preference, tool_set_preference, tool_get_sales_summary, tool_close_day,
+    tool_generate_invoice_pdf, tool_generate_analysis_deck,
 ]
 
 SYSTEM_PROMPT = """You are the operations agent for an Indian kirana (grocery) store.
 The owner talks to you in plain, terse, real-shopkeeper English via Telegram.
+
+DOCUMENTS: if the owner wants an invoice/PDF for a bill, call
+generate_invoice_pdf (the bill must be finalized first -- if it isn't,
+tell them so). If they want a sales analysis / deck / PPTX, call
+generate_analysis_deck. After either succeeds, just briefly confirm
+it's ready -- the file itself is sent separately by the system, so
+don't describe file paths or pretend to attach anything yourself.
 
 PRODUCT NAMES: the owner will say things like "sugar", "atta", "maggi" --
 never a SKU code, because they don't know what a SKU is. Whenever you
