@@ -98,7 +98,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # that happened, say so plainly instead of a blind "try again",
         # which is what caused the double-payment: the owner retried an
         # action that had actually already gone through.
-        mutation = pop_last_mutation()
+        mutation = pop_last_mutation(update.update_id)
         if mutation:
             await update.message.reply_text(
                 f"{mutation}\n\n(Then hit a connection hiccup after that, so this may look "
@@ -123,7 +123,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # an unresolved function_call instead of final text (e.g. hit the
         # automatic-function-calling cap). Silence here looks like a hang
         # from the owner's side -- say something instead of nothing.
-        mutation = pop_last_mutation()
+        mutation = pop_last_mutation(update.update_id)
         reply_text = mutation or "Sorry, I got stuck partway through that -- could you try again or rephrase?"
     await update.message.reply_text(reply_text)
 

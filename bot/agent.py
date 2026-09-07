@@ -40,6 +40,7 @@ from tools.documents import generate_invoice_pdf, generate_analysis_deck
 # so this isn't just documentation, the wording actually matters.
 
 import contextvars
+import threading
 
 # Set once per incoming Telegram update, before the agent turn runs --
 # see set_current_update_id() below. Tool wrappers read from this
@@ -55,6 +56,52 @@ def set_current_update_id(update_id) -> None:
     """Call this from bot/main.py at the start of handling each
     Telegram update, before calling chat.send_message()."""
     _current_update_id.set(str(update_id))
+
+
+# Automatic function calling executes tools inside asyncio.to_thread().
+# ContextVars set inside that worker thread do not propagate back to the
+# Telegram event-loop thread, so mutation results are kept in a small,
+# thread-safe process-level store keyed by Telegram update_id.
+_mutation_lock = threading.Lock()
+_last_mutations = {}
+
+
+def set_last_mutation(message: str) -> None:
+    """Record a successful mutation for the current Telegram update.
+
+    bot/main.py uses this when Gemini fails after a database mutation has
+    already committed, so the owner is told not to repeat the action.
+    """
+    update_id = _current_update_id.get()
+    if update_id is None or not message:
+        return
+
+    with _mutation_lock:
+        _last_mutations.setdefault(str(update_id), []).append(str(message))
+
+
+def pop_last_mutation(update_id=None) -> Optional[str]:
+    """Return and clear mutation results recorded for a Telegram update."""
+    if update_id is None:
+        update_id = _current_update_id.get()
+    if update_id is None:
+        return None
+
+    with _mutation_lock:
+        messages = _last_mutations.pop(str(update_id), None)
+
+    if not messages:
+        return None
+
+    return "\n".join(messages)
+
+
+def _record_successful_mutation(result: dict, description: str) -> dict:
+    """Record a mutation only when the underlying tool reports success."""
+    if result.get("ok"):
+        set_last_mutation(description)
+    return result
+
 
 def tool_get_product_info(sku: str) -> dict:
     """Look up a product's details (price, GST rate, stock) by SKU.
@@ -121,9 +168,12 @@ def tool_add_product(name: str, hsn_code: str, gst_rate: float, unit: str,
             defaults to MRP.
         reorder_level: Optional stock threshold for low-stock alerts.
     """
-    return add_product(name, hsn_code, gst_rate, unit, mrp, cost_price,
-                        is_loose=is_loose, sell_price=sell_price,
-                        reorder_level=reorder_level)
+    result = add_product(name, hsn_code, gst_rate, unit, mrp, cost_price,
+                         is_loose=is_loose, sell_price=sell_price,
+                         reorder_level=reorder_level)
+    return _record_successful_mutation(
+        result, f"Product '{name}' was added successfully."
+    )
 
 
 def tool_receive_stock(sku: str, qty: float, cost_price: Optional[float] = None) -> dict:
@@ -134,7 +184,10 @@ def tool_receive_stock(sku: str, qty: float, cost_price: Optional[float] = None)
         qty: Quantity received, must be positive.
         cost_price: Optional new cost price for this batch, if the owner mentioned one.
     """
-    return receive_stock(sku, qty, cost_price)
+    result = receive_stock(sku, qty, cost_price)
+    return _record_successful_mutation(
+        result, f"Stock receipt for {qty:g} unit(s) of {sku} was recorded successfully."
+    )
 
 
 def tool_start_bill(customer_id: Optional[int] = None) -> dict:
@@ -143,7 +196,13 @@ def tool_start_bill(customer_id: Optional[int] = None) -> dict:
     Args:
         customer_id: Optional existing customer id to link this bill to.
     """
-    return start_bill(customer_id)
+    result = start_bill(customer_id)
+    return _record_successful_mutation(
+        result,
+        f"Draft bill #{result.get('bill_id')} was created successfully."
+        if result.get("bill_id") is not None
+        else "Draft bill was created successfully.",
+    )
 
 
 def tool_add_bill_item(bill_id: int, sku: str, qty: float,
@@ -163,7 +222,17 @@ def tool_add_bill_item(bill_id: int, sku: str, qty: float,
         unit_price: Optional override price; defaults to the product's sell_price.
         override_below_cost: Only set true after the owner explicitly confirms.
     """
-    return add_bill_item(bill_id, sku, qty, unit_price=unit_price, override_below_cost=override_below_cost)
+    result = add_bill_item(
+        bill_id,
+        sku,
+        qty,
+        unit_price=unit_price,
+        override_below_cost=override_below_cost,
+    )
+    return _record_successful_mutation(
+        result,
+        f"{qty:g} unit(s) of {sku} were added to bill #{bill_id} successfully.",
+    )
 
 
 def tool_remove_bill_item(bill_item_id: int) -> dict:
@@ -172,7 +241,10 @@ def tool_remove_bill_item(bill_item_id: int) -> dict:
     Args:
         bill_item_id: The id of the bill_items row to remove.
     """
-    return remove_bill_item(bill_item_id)
+    result = remove_bill_item(bill_item_id)
+    return _record_successful_mutation(
+        result, f"Bill item {bill_item_id} was removed successfully."
+    )
 
 
 def tool_get_bill_draft(bill_id: int) -> dict:
@@ -195,7 +267,16 @@ def tool_finalize_bill(bill_id: int, payment_mode: Optional[str] = None,
         payment_mode: One of 'cash', 'upi', 'card', or 'khata'.
         payment_ref: Optional payment reference, e.g. a UPI transaction id.
     """
-    return finalize_bill(bill_id, payment_mode, payment_ref)
+    result = finalize_bill(bill_id, payment_mode, payment_ref)
+    if result.get("ok") and not result.get("already_finalized"):
+        total = result.get("total")
+        set_last_mutation(
+            f"Bill #{bill_id} was finalized successfully"
+            + (f" for ₹{total:.2f}." if isinstance(total, (int, float)) else ".")
+        )
+    elif result.get("ok") and result.get("already_finalized"):
+        set_last_mutation(f"Bill #{bill_id} was already finalized; no duplicate sale was created.")
+    return result
 
 
 def tool_get_customer_balance(name: str) -> dict:
@@ -214,7 +295,17 @@ def tool_charge_khata(name: str, amount: float) -> dict:
         name: The customer's name.
         amount: Amount to charge, must be positive.
     """
-    return charge_khata(name, amount, idempotency_key=_current_update_id.get())
+    result = charge_khata(name, amount, idempotency_key=_current_update_id.get())
+    if result.get("ok"):
+        if result.get("already_recorded"):
+            set_last_mutation(
+                f"Khata charge for {name} was already recorded; no duplicate charge was created."
+            )
+        else:
+            set_last_mutation(
+                f"₹{float(amount):.2f} was added to {name}'s khata successfully."
+            )
+    return result
 
 
 def tool_record_khata_payment(name: str, amount: float) -> dict:
@@ -224,7 +315,17 @@ def tool_record_khata_payment(name: str, amount: float) -> dict:
         name: The customer's name.
         amount: Amount paid, must be positive.
     """
-    return record_khata_payment(name, amount, idempotency_key=_current_update_id.get())
+    result = record_khata_payment(name, amount, idempotency_key=_current_update_id.get())
+    if result.get("ok"):
+        if result.get("already_recorded"):
+            set_last_mutation(
+                f"Khata payment for {name} was already recorded; no duplicate payment was created."
+            )
+        else:
+            set_last_mutation(
+                f"₹{float(amount):.2f} payment from {name} was recorded successfully."
+            )
+    return result
 
 
 def tool_get_preference(key: str) -> dict:
@@ -246,7 +347,10 @@ def tool_set_preference(key: str, value: str) -> dict:
         key: The preference key.
         value: The preference value.
     """
-    return set_preference(key, value)
+    result = set_preference(key, value)
+    return _record_successful_mutation(
+        result, f"Preference '{key}' was saved successfully."
+    )
 
 
 def tool_get_sales_summary(date_from: Optional[str] = None, date_to: Optional[str] = None) -> dict:
